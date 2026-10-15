@@ -1,0 +1,85 @@
+NURO Healthcare ↔ Wokwi ESP32 integration patch
+================================================
+
+Your Wokwi sketch currently prints HR, SpO2, Motion and Alert to Serial. This patch sends those changing values over HTTPS to the NURO Flask backend. The dashboard polls /api/state every second, so Patient/Caretaker pages refresh automatically.
+
+1) Add these includes at the top of sketch.ino:
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+2) Add these constants near the other global variables. Replace the URL with your deployed HTTPS website URL. Generate a long random token and set the SAME token as WOKWI_DEVICE_TOKEN on the backend host. Do not commit the real token into a public project.
+
+const char* NURO_WIFI_SSID = "Wokwi-GUEST";
+const char* NURO_WIFI_PASSWORD = "";
+const char* NURO_API_URL = "https://YOUR-DEPLOYED-NURO-DOMAIN/api/wokwi/vitals";
+const char* NURO_DEVICE_TOKEN = "REPLACE_WITH_RANDOM_DEVICE_TOKEN";
+const char* NURO_DEVICE_ID = "wokwi-ht01-01";
+const char* NURO_PATIENT_ID = "demo-patient";
+
+3) Add this function near the end of sketch.ino:
+
+void publishNuroVitals() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  // These are simulated values, not measurements from a real medical device.
+  static float simulatedTemp = 36.8;
+  static int simulatedResp = 16;
+  simulatedTemp += random(-2, 3) / 10.0;
+  simulatedTemp = constrain(simulatedTemp, 36.0, 39.5);
+  simulatedResp = constrain(simulatedResp + random(-1, 2), 10, 30);
+  int simulatedSystolic = 118 + random(-5, 6);
+  int simulatedDiastolic = 76 + random(-4, 5);
+
+  WiFiClientSecure client;
+  // TEST/SIMULATION ONLY: disables certificate verification. Use a verified CA
+  // certificate for production and never send real patient data through Wokwi.
+  client.setInsecure();
+  HTTPClient http;
+  if (!http.begin(client, NURO_API_URL)) return;
+  http.setTimeout(4000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + NURO_DEVICE_TOKEN);
+
+  String payload = "{";
+  payload += "\"device_id\":\"" + String(NURO_DEVICE_ID) + "\",";
+  payload += "\"patient_id\":\"" + String(NURO_PATIENT_ID) + "\",";
+  payload += "\"heart_rate\":" + String(filteredHR, 1) + ",";
+  payload += "\"spo2\":" + String(filteredSpO2, 1) + ",";
+  payload += "\"resp_rate\":" + String(simulatedResp) + ",";
+  payload += "\"temperature\":" + String(simulatedTemp, 1) + ",";
+  payload += "\"systolic\":" + String(simulatedSystolic) + ",";
+  payload += "\"diastolic\":" + String(simulatedDiastolic) + ",";
+  payload += "\"motion\":" + String(isMoving ? "true" : "false") + ",";
+  payload += "\"alert\":" + String(alertActive ? "true" : "false");
+  payload += "}";
+
+  int code = http.POST(payload);
+  Serial.print("NURO API HTTP status: ");
+  Serial.println(code);
+  http.end();
+}
+
+4) In setup(), after Serial.begin(115200), add:
+
+  WiFi.begin(NURO_WIFI_SSID, NURO_WIFI_PASSWORD, 6);
+  Serial.print("Connecting to Wokwi WiFi");
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " connected" : " not connected yet");
+
+5) In loop(), inside the existing `if (now - lastUpdate >= 1000)` block, call this after the filtered values and `alertActive` have been calculated (for example just after the Serial streaming block):
+
+  publishNuroVitals();
+
+Important setup notes:
+- The website must be deployed to a public HTTPS URL. `localhost` and `127.0.0.1` inside Wokwi do not refer to your laptop/server.
+- On the backend host, configure WOKWI_DEVICE_TOKEN as a long random secret before starting the Flask app.
+- Set the same secret in NURO_DEVICE_TOKEN in Wokwi. Rotate it if the Wokwi project is public or the token is exposed.
+- Do not put a Gemini API key in the ESP32 sketch. The Gemini key belongs only on the backend server.
+- This starter integration uses one shared demo vitals stream for the existing portal. `patient_id` is a label only; it is not yet an authorization/assignment system linking specific patient accounts to specific caretakers. Do not use real patient data until per-patient authorization and production security are implemented.
+- The Wokwi public gateway traffic is not suitable for private health data. Use simulated/demo values only.
